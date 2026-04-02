@@ -13,6 +13,10 @@ Solana's [durable transaction nonces](https://docs.solanalabs.com/implemented-pr
 
 Because standard multisig workflows focus on *what* is being signed rather than *how* the transaction's lifetime is scoped, this vector is easy to miss. `solana-nonce-guard` audits your multisig for every stage of this attack pattern and flags exposures before they can be exploited.
 
+### Real-world validation
+
+This tool was validated against the **Drift Protocol exploit (April 2026)**, where an attacker used durable nonces to pre-sign transactions against a 2/5 Squads multisig, then executed an admin takeover and drained ~$280M. The tool's test suite uses real transaction data from this exploit, and would have detected the attack **9 days before execution** at the nonce staging phase.
+
 ## Installation
 
 ### From source
@@ -213,6 +217,7 @@ The tool uses raw JSON-RPC calls via [reqwest](https://crates.io/crates/reqwest)
 ```
 src/
 ├── main.rs          # CLI entrypoint (clap v4), subcommand orchestration
+├── lib.rs           # Public module exports for integration tests
 ├── rpc.rs           # Thin JSON-RPC client (HTTP + WebSocket)
 ├── scanner.rs       # Nonce account discovery via getProgramAccounts
 ├── tx_analyzer.rs   # Transaction history analysis, rapid execution detection
@@ -220,6 +225,45 @@ src/
 ├── reporter.rs      # JSON + Markdown output formatting
 └── types.rs         # Shared types (AuditReport, NonceFinding, TxFinding, etc.)
 ```
+
+## Testing
+
+### Unit tests
+
+41 tests covering all decoders, detection logic, and recommendation generation. Tests use real mainnet data from the Drift Protocol exploit as fixtures — no mocks.
+
+```bash
+cargo test
+```
+
+### Live integration tests
+
+4 integration tests that hit real Solana mainnet. Gated behind `#[ignore]` to avoid running during normal development.
+
+```bash
+# Run with public RPC (may be rate-limited)
+cargo test -- --ignored
+
+# Run with a dedicated RPC (recommended)
+RPC_URL=https://your-rpc.helius.xyz cargo test -- --ignored
+```
+
+### What the tests verify
+
+| Category | Tests | Data source |
+|---|---|---|
+| Squads v4 multisig decoding | 3 | Real Drift Security Council account |
+| SPL multisig decoding | 3 | Real USDC mint authority |
+| Nonce account decoding | 4 | Real Drift exploit nonce account |
+| Transaction detection (all 4 nonce instruction types) | 8 | Real Drift exploit txs + Solana source-verified format |
+| Rapid execution detection | 2 | Real 4-slot gap from Drift exploit |
+| Fee payer extraction | 4 | Real Drift exploit txs |
+| Risk assessment logic | 3 | All branches (unknown/known/none creator) |
+| Recommendation generation | 6 | Edge cases including single-member multisig |
+| Reporter output | 3 | JSON + Markdown structure |
+| Live mainnet integration | 4 | Real Solana mainnet (`#[ignore]`) |
+
+All hardcoded constants (byte offsets, Anchor discriminators, instruction type names, field names) are verified against either real mainnet RPC responses or the [Agave runtime source code](https://github.com/anza-xyz/agave/blob/master/transaction-status/src/parse_system.rs).
 
 ## Claude skill integration
 
