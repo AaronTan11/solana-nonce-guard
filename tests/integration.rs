@@ -44,13 +44,22 @@ async fn test_fetch_and_decode_real_drift_multisig() {
 
 /// Find nonce accounts for a known Drift signer.
 /// The nonce account from the exploit should still be on-chain.
+///
+/// NOTE: Requires a dedicated RPC (Helius, Triton, QuickNode).
+/// Public RPCs block getProgramAccounts on the System Program.
+/// Run with: RPC_URL=https://your-rpc.helius.xyz cargo test -- --ignored
 #[tokio::test]
 #[ignore]
 async fn test_find_nonce_accounts_for_drift_signer() {
-    let client = RpcClient::new(&get_rpc_url());
+    let rpc_url = get_rpc_url();
+    if rpc_url.contains("api.mainnet-beta.solana.com") {
+        eprintln!("SKIPPED: requires dedicated RPC (public RPC blocks getProgramAccounts)");
+        eprintln!("Run with: RPC_URL=https://your-rpc.helius.xyz cargo test -- --ignored");
+        return;
+    }
 
-    // This is one of the Drift signers from the exploit — the nonce authority
-    // for nonce account 7s7s6saC5LHZoLyBXLM3pCjpWaA7meyQdP8NiH9ktAeC
+    let client = RpcClient::new(&rpc_url);
+
     let nonces = scanner::find_nonce_accounts(
         &client,
         "39JyWrdbVdRqjzw9yyEjxNtTbTKcTPLdtdCgbz7C7Aq8",
@@ -58,7 +67,6 @@ async fn test_find_nonce_accounts_for_drift_signer() {
     .await
     .expect("Should query nonce accounts without error");
 
-    // The exploit nonce account should still exist (it had 80 bytes / state=1 when we checked)
     let exploit_nonce = nonces.iter().find(|n| {
         n.address == "7s7s6saC5LHZoLyBXLM3pCjpWaA7meyQdP8NiH9ktAeC"
     });
@@ -102,10 +110,20 @@ async fn test_scan_tx_history_real() {
 
 /// Run the full scan pipeline against the Drift multisig.
 /// This is the ultimate end-to-end test.
+///
+/// NOTE: Requires a dedicated RPC (Helius, Triton, QuickNode).
+/// Public RPCs block getProgramAccounts on the System Program.
 #[tokio::test]
 #[ignore]
 async fn test_full_scan_pipeline_real() {
-    let client = RpcClient::new(&get_rpc_url());
+    let rpc_url = get_rpc_url();
+    if rpc_url.contains("api.mainnet-beta.solana.com") {
+        eprintln!("SKIPPED: requires dedicated RPC (public RPC blocks getProgramAccounts)");
+        eprintln!("Run with: RPC_URL=https://your-rpc.helius.xyz cargo test -- --ignored");
+        return;
+    }
+
+    let client = RpcClient::new(&rpc_url);
 
     // Step 1: Decode multisig
     let ms = multisig::fetch_and_decode_multisig(
