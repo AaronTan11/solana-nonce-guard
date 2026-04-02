@@ -491,4 +491,158 @@ mod tests {
         let summary = summarize_payload(&instructions);
         assert_eq!(summary, "spl-token:transfer → CustomProgram123");
     }
+
+    // ---------- Tests for all nonce instruction types ----------
+    // JSON format matches the verified real structure from Drift exploit txs.
+    // Real initializeNonce/authorizeNonce/withdrawFromNonce txs were pruned from mainnet,
+    // so we construct JSON using the exact same format (program, programId, parsed.type, parsed.info).
+
+    #[test]
+    fn test_initialize_nonce_detected() {
+        let tx = json!({
+            "transaction": {
+                "message": {
+                    "instructions": [
+                        {
+                            "program": "system",
+                            "programId": "11111111111111111111111111111111",
+                            "parsed": { "type": "createAccount", "info": {} },
+                            "stackHeight": 1
+                        },
+                        {
+                            "program": "system",
+                            "programId": "11111111111111111111111111111111",
+                            "parsed": {
+                                "type": "initializeNonce",
+                                "info": {
+                                    "nonceAccount": "NonceInit111111111111111111111111",
+                                    "nonceAuthority": "AuthInit111111111111111111111111111"
+                                }
+                            },
+                            "stackHeight": 1
+                        }
+                    ]
+                }
+            }
+        });
+
+        let findings = analyze_transaction(&tx, "InitSig", 50000);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].risk, RiskLevel::Medium);
+        assert_eq!(findings[0].nonce_account_used, "NonceInit111111111111111111111111");
+        assert_eq!(findings[0].nonce_authority, "AuthInit111111111111111111111111111");
+        assert!(findings[0].payload_summary.contains("InitializeNonceAccount"));
+    }
+
+    #[test]
+    fn test_authorize_nonce_detected() {
+        let tx = json!({
+            "transaction": {
+                "message": {
+                    "instructions": [
+                        {
+                            "program": "system",
+                            "programId": "11111111111111111111111111111111",
+                            "parsed": {
+                                "type": "authorizeNonce",
+                                "info": {
+                                    "nonceAccount": "NonceAuth111111111111111111111111",
+                                    "nonceAuthority": "OldAuth1111111111111111111111111111",
+                                    "newAuthorized": "NewAuth1111111111111111111111111111"
+                                }
+                            },
+                            "stackHeight": 1
+                        }
+                    ]
+                }
+            }
+        });
+
+        let findings = analyze_transaction(&tx, "AuthSig", 60000);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].risk, RiskLevel::High);
+        assert_eq!(findings[0].nonce_account_used, "NonceAuth111111111111111111111111");
+        // Should extract the NEW authority, not the old one
+        assert_eq!(
+            findings[0].nonce_authority,
+            "NewAuth1111111111111111111111111111",
+            "Should use newAuthorized, not nonceAuthority"
+        );
+        assert!(findings[0].payload_summary.contains("authority changed"));
+    }
+
+    #[test]
+    fn test_withdraw_nonce_detected() {
+        let tx = json!({
+            "transaction": {
+                "message": {
+                    "instructions": [
+                        {
+                            "program": "system",
+                            "programId": "11111111111111111111111111111111",
+                            "parsed": {
+                                "type": "withdrawFromNonce",
+                                "info": {
+                                    "nonceAccount": "NonceWd1111111111111111111111111111",
+                                    "nonceAuthority": "AuthWd11111111111111111111111111111",
+                                    "destination": "Dest111111111111111111111111111111111",
+                                    "lamports": 1447680
+                                }
+                            },
+                            "stackHeight": 1
+                        }
+                    ]
+                }
+            }
+        });
+
+        let findings = analyze_transaction(&tx, "WdSig", 70000);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].risk, RiskLevel::Low);
+        assert_eq!(findings[0].nonce_account_used, "NonceWd1111111111111111111111111111");
+        assert!(findings[0].payload_summary.contains("WithdrawNonceAccount"));
+    }
+
+    #[test]
+    fn test_multiple_nonce_ops_in_one_tx() {
+        // advanceNonce at ix[0] + initializeNonce at ix[1] — both should be detected
+        let tx = json!({
+            "transaction": {
+                "message": {
+                    "instructions": [
+                        {
+                            "program": "system",
+                            "programId": "11111111111111111111111111111111",
+                            "parsed": {
+                                "type": "advanceNonce",
+                                "info": {
+                                    "nonceAccount": "NonceA111111111111111111111111111",
+                                    "nonceAuthority": "AuthA1111111111111111111111111111",
+                                    "recentBlockhashesSysvar": "SysvarRecentB1ockHashes11111111111111111111"
+                                }
+                            },
+                            "stackHeight": 1
+                        },
+                        {
+                            "program": "system",
+                            "programId": "11111111111111111111111111111111",
+                            "parsed": {
+                                "type": "initializeNonce",
+                                "info": {
+                                    "nonceAccount": "NonceB111111111111111111111111111",
+                                    "nonceAuthority": "AuthB1111111111111111111111111111"
+                                }
+                            },
+                            "stackHeight": 1
+                        }
+                    ]
+                }
+            }
+        });
+
+        let findings = analyze_transaction(&tx, "MultiSig", 80000);
+        assert_eq!(findings.len(), 2, "Should detect both nonce operations");
+        assert_eq!(findings[0].risk, RiskLevel::High, "advanceNonce should be High");
+        assert_eq!(findings[1].risk, RiskLevel::Medium, "initializeNonce should be Medium");
+    }
 }

@@ -358,7 +358,7 @@ fn compute_overall_risk(
     }
 
     // Structural risk: low threshold
-    let min_threshold = (ms.members.len() as f64 / 2.0).ceil() as u16 + 1;
+    let min_threshold = ((ms.members.len() as f64 / 2.0).ceil() as u16 + 1).min(ms.members.len() as u16);
     if ms.threshold < min_threshold && max_risk < types::RiskLevel::Medium {
         max_risk = types::RiskLevel::Medium;
     }
@@ -407,7 +407,7 @@ fn generate_recommendations(
     }
 
     // Threshold analysis
-    let min_threshold = (ms.members.len() as f64 / 2.0).ceil() as u16 + 1;
+    let min_threshold = ((ms.members.len() as f64 / 2.0).ceil() as u16 + 1).min(ms.members.len() as u16);
     if ms.threshold < min_threshold {
         recs.push(format!(
             "MEDIUM: Current threshold {}/{} is below recommended minimum of {}. \
@@ -572,5 +572,110 @@ mod tests {
         );
         // Should still recommend monitoring
         assert!(recs.iter().any(|r| r.contains("monitoring")));
+    }
+
+    #[test]
+    fn test_nonces_found_but_no_tx_history() {
+        let ms = drift_multisig(); // 2/5, no timelock
+        let nonce_findings = vec![NonceFinding {
+            nonce_account: "SomeNonce".to_string(),
+            authority: "Signer0".to_string(),
+            created_by: Some("UnknownAttacker".to_string()),
+            creation_slot: None,
+            nonce_value: "nonce".to_string(),
+            risk: RiskLevel::Critical,
+            reason: "Unknown creator".to_string(),
+        }];
+
+        let risk = compute_overall_risk(&nonce_findings, &[], &ms);
+        assert_eq!(risk, RiskLevel::Critical);
+
+        let recs = generate_recommendations(&nonce_findings, &[], &ms);
+        assert!(recs.iter().any(|r| r.contains("unknown wallets")));
+        assert!(recs.iter().any(|r| r.contains("threshold")));
+        assert!(recs.iter().any(|r| r.contains("timelock")));
+        // Should NOT recommend reviewing pending txs or freezing (no tx findings)
+        assert!(
+            !recs.iter().any(|r| r.contains("freeze")),
+            "No rapid execution → no freeze recommendation"
+        );
+    }
+
+    #[test]
+    fn test_clean_nonces_but_low_threshold() {
+        let ms = MultisigInfo {
+            address: "LowThreshold".to_string(),
+            program: "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf".to_string(),
+            threshold: 1,
+            time_lock: 3600,
+            members: (0..5)
+                .map(|i| MemberInfo {
+                    pubkey: format!("Signer{}", i),
+                    permissions: 7,
+                })
+                .collect(),
+        };
+
+        let risk = compute_overall_risk(&[], &[], &ms);
+        assert_eq!(risk, RiskLevel::Medium, "Low threshold should bump to Medium");
+
+        let recs = generate_recommendations(&[], &[], &ms);
+        assert!(
+            recs.iter().any(|r| r.contains("1/5") && r.contains("4")),
+            "Should recommend raising from 1/5 to 4"
+        );
+        // Should NOT warn about nonces or txs
+        assert!(!recs.iter().any(|r| r.contains("unknown wallets")));
+        assert!(!recs.iter().any(|r| r.contains("pending")));
+    }
+
+    #[test]
+    fn test_single_member_multisig() {
+        let ms = MultisigInfo {
+            address: "Solo".to_string(),
+            program: "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf".to_string(),
+            threshold: 1,
+            time_lock: 0,
+            members: vec![MemberInfo {
+                pubkey: "OnlySigner".to_string(),
+                permissions: 7,
+            }],
+        };
+
+        let risk = compute_overall_risk(&[], &[], &ms);
+        // min_threshold = min(ceil(0.5)+1, 1) = min(2, 1) = 1
+        // threshold=1 >= 1, so no structural risk bump
+        assert_eq!(risk, RiskLevel::Info);
+
+        let recs = generate_recommendations(&[], &[], &ms);
+        // Should NOT produce "raise to 2/1" nonsense
+        assert!(
+            !recs.iter().any(|r| r.contains("threshold") || r.contains("Threshold")),
+            "Single-member multisig should not get threshold recommendation, got: {:?}",
+            recs
+        );
+    }
+
+    #[test]
+    fn test_two_member_low_threshold() {
+        let ms = MultisigInfo {
+            address: "TwoMember".to_string(),
+            program: "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf".to_string(),
+            threshold: 1,
+            time_lock: 3600,
+            members: (0..2)
+                .map(|i| MemberInfo {
+                    pubkey: format!("Signer{}", i),
+                    permissions: 7,
+                })
+                .collect(),
+        };
+
+        let recs = generate_recommendations(&[], &[], &ms);
+        assert!(
+            recs.iter().any(|r| r.contains("1/2") && r.contains("2")),
+            "Should recommend raising from 1/2 to 2, got: {:?}",
+            recs
+        );
     }
 }

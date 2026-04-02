@@ -80,14 +80,66 @@ pub fn decode_nonce_account(data: &[u8], address: &str) -> Result<NonceAccountIn
     })
 }
 
+/// Extract the fee payer (first signer) from a transaction JSON value.
+/// Handles both jsonParsed format (objects with "pubkey" field) and plain string format.
+pub fn extract_fee_payer(tx: &serde_json::Value) -> Option<String> {
+    tx["transaction"]["message"]["accountKeys"]
+        .as_array()
+        .and_then(|keys| keys.first())
+        .and_then(|k| {
+            k.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| k["pubkey"].as_str().map(|s| s.to_string()))
+        })
+}
+
+/// Assess risk level for a nonce account based on who created it.
+/// Returns (risk_level, reason_string, is_suspicious).
+pub fn assess_nonce_risk(
+    member_pubkey: &str,
+    created_by: &Option<String>,
+    member_pubkeys: &[&str],
+) -> (RiskLevel, String, bool) {
+    match created_by {
+        Some(creator) if member_pubkeys.contains(&creator.as_str()) => (
+            RiskLevel::High,
+            format!(
+                "Durable nonce account found with authority {}. Created by known signer {}.",
+                &member_pubkey[..member_pubkey.len().min(12)],
+                &creator[..creator.len().min(12)]
+            ),
+            false,
+        ),
+        Some(creator) => (
+            RiskLevel::Critical,
+            format!(
+                "Durable nonce account created by UNKNOWN wallet {} for signer {}. \
+                 This may indicate an attacker staging a pre-signed transaction attack.",
+                creator,
+                &member_pubkey[..member_pubkey.len().min(12)]
+            ),
+            true,
+        ),
+        None => (
+            RiskLevel::High,
+            format!(
+                "Durable nonce account found for signer {} but creation history unavailable.",
+                &member_pubkey[..member_pubkey.len().min(12)]
+            ),
+            false,
+        ),
+    }
+}
+
 /// Determine who created a nonce account by finding its earliest transaction.
 /// Returns the fee payer (first signer) of the creation transaction.
 async fn determine_nonce_creator(
     rpc: &RpcClient,
     nonce_address: &str,
 ) -> Result<Option<String>> {
-    // Get the oldest signature for this nonce account
-    let sigs = rpc.get_signatures_for_address(nonce_address, 1).await?;
+    // Fetch signature history for this nonce account.
+    // Solana returns newest-first, so .last() on the full list gives us the oldest (creation) tx.
+    let sigs = rpc.get_signatures_for_address(nonce_address, 100).await?;
 
     let sig = match sigs.last() {
         Some(s) => &s.signature,
@@ -96,18 +148,7 @@ async fn determine_nonce_creator(
 
     let tx = rpc.get_transaction(sig).await?;
 
-    // The fee payer is the first account key in the transaction
-    let fee_payer = tx["transaction"]["message"]["accountKeys"]
-        .as_array()
-        .and_then(|keys| keys.first())
-        .and_then(|k| {
-            // jsonParsed format: accountKeys can be objects with "pubkey" field or plain strings
-            k.as_str()
-                .map(|s| s.to_string())
-                .or_else(|| k["pubkey"].as_str().map(|s| s.to_string()))
-        });
-
-    Ok(fee_payer)
+    Ok(extract_fee_payer(&tx))
 }
 
 /// Scan all multisig signers for nonce accounts. Returns (signer_infos, nonce_findings).
@@ -131,35 +172,11 @@ pub async fn scan_all_signers(
             let created_by = determine_nonce_creator(rpc, &nonce.address).await?;
 
             // Assess risk based on creator
-            let (risk, reason) = match &created_by {
-                Some(creator) if member_pubkeys.contains(&creator.as_str()) => (
-                    RiskLevel::High,
-                    format!(
-                        "Durable nonce account found with authority {}. Created by known signer {}.",
-                        &member.pubkey[..12],
-                        &creator[..12.min(creator.len())]
-                    ),
-                ),
-                Some(creator) => {
-                    is_suspicious = true;
-                    (
-                        RiskLevel::Critical,
-                        format!(
-                            "Durable nonce account created by UNKNOWN wallet {} for signer {}. \
-                             This may indicate an attacker staging a pre-signed transaction attack.",
-                            creator,
-                            &member.pubkey[..12]
-                        ),
-                    )
-                }
-                None => (
-                    RiskLevel::High,
-                    format!(
-                        "Durable nonce account found for signer {} but creation history unavailable.",
-                        &member.pubkey[..12]
-                    ),
-                ),
-            };
+            let (risk, reason, suspicious) =
+                assess_nonce_risk(&member.pubkey, &created_by, &member_pubkeys);
+            if suspicious {
+                is_suspicious = true;
+            }
 
             nonce_findings.push(NonceFinding {
                 nonce_account: nonce.address.clone(),
@@ -265,5 +282,113 @@ mod tests {
         assert!(nonce.authority.len() >= 32, "Authority should be a valid pubkey");
         assert!(nonce.nonce_value.len() >= 32, "Nonce value should be a valid hash");
         assert!(nonce.lamports_per_signature > 0, "Fee should be non-zero");
+    }
+
+    // ---------- extract_fee_payer tests ----------
+
+    fn load_fixture(name: &str) -> serde_json::Value {
+        let path = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name);
+        let data = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e));
+        let json: serde_json::Value = serde_json::from_str(&data)
+            .unwrap_or_else(|e| panic!("Failed to parse {}: {}", name, e));
+        json["result"].clone()
+    }
+
+    #[test]
+    fn test_extract_fee_payer_from_drift_exploit_tx1() {
+        // Real Drift exploit tx1 — fee payer is the attacker's signer
+        let tx = load_fixture("drift_exploit_tx1.json");
+        let fee_payer = extract_fee_payer(&tx);
+        assert_eq!(
+            fee_payer,
+            Some("39JyWrdbVdRqjzw9yyEjxNtTbTKcTPLdtdCgbz7C7Aq8".to_string()),
+            "Fee payer should be the first account key (attacker signer)"
+        );
+    }
+
+    #[test]
+    fn test_extract_fee_payer_from_drift_exploit_tx2() {
+        // Real Drift exploit tx2 — different fee payer
+        let tx = load_fixture("drift_exploit_tx2.json");
+        let fee_payer = extract_fee_payer(&tx);
+        assert!(fee_payer.is_some(), "Should extract fee payer from tx2");
+        // tx2 has a different first account key than tx1
+        assert_ne!(
+            fee_payer.as_deref(),
+            Some("39JyWrdbVdRqjzw9yyEjxNtTbTKcTPLdtdCgbz7C7Aq8"),
+            "tx2 should have a different fee payer than tx1"
+        );
+    }
+
+    #[test]
+    fn test_extract_fee_payer_missing_keys() {
+        let empty = serde_json::json!({});
+        assert_eq!(extract_fee_payer(&empty), None);
+
+        let no_keys = serde_json::json!({"transaction": {"message": {}}});
+        assert_eq!(extract_fee_payer(&no_keys), None);
+
+        let empty_keys = serde_json::json!({"transaction": {"message": {"accountKeys": []}}});
+        assert_eq!(extract_fee_payer(&empty_keys), None);
+    }
+
+    #[test]
+    fn test_extract_fee_payer_string_format() {
+        // Some RPC encodings return account keys as plain strings
+        let tx = serde_json::json!({
+            "transaction": {
+                "message": {
+                    "accountKeys": [
+                        "FeePayer111111111111111111111111111111111111",
+                        "OtherAccount22222222222222222222222222222222"
+                    ]
+                }
+            }
+        });
+        assert_eq!(
+            extract_fee_payer(&tx),
+            Some("FeePayer111111111111111111111111111111111111".to_string())
+        );
+    }
+
+    // ---------- assess_nonce_risk tests ----------
+
+    #[test]
+    fn test_assess_risk_unknown_creator() {
+        let members = vec!["Signer0", "Signer1", "Signer2"];
+        let (risk, reason, suspicious) = assess_nonce_risk(
+            "Signer0_Full_Pubkey",
+            &Some("UnknownAttackerWallet".to_string()),
+            &members,
+        );
+        assert_eq!(risk, RiskLevel::Critical);
+        assert!(suspicious, "Unknown creator should be suspicious");
+        assert!(reason.contains("UNKNOWN"), "Reason should mention UNKNOWN");
+    }
+
+    #[test]
+    fn test_assess_risk_known_creator() {
+        let members = vec!["Signer0", "Signer1", "Signer2"];
+        let (risk, _reason, suspicious) = assess_nonce_risk(
+            "Signer0_Full_Pubkey",
+            &Some("Signer1".to_string()),
+            &members,
+        );
+        assert_eq!(risk, RiskLevel::High);
+        assert!(!suspicious, "Known creator should not be suspicious");
+    }
+
+    #[test]
+    fn test_assess_risk_no_history() {
+        let members = vec!["Signer0"];
+        let (risk, reason, suspicious) = assess_nonce_risk(
+            "Signer0_Full_Pubkey",
+            &None,
+            &members,
+        );
+        assert_eq!(risk, RiskLevel::High);
+        assert!(!suspicious);
+        assert!(reason.contains("unavailable"));
     }
 }
