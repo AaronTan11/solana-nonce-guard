@@ -9,8 +9,9 @@ const SQUADS_V4_PROGRAM: &str = "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf";
 /// SPL Token program ID (owns SPL multisig accounts).
 const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
-/// Expected Anchor discriminator for Squads v4 Multisig: SHA256("account:Multisig")[0..8]
-const SQUADS_MULTISIG_DISCRIMINATOR: [u8; 8] = [0xd2, 0x96, 0x1d, 0xba, 0xf4, 0x4b, 0x38, 0x51];
+/// Anchor discriminator for Squads v4 Multisig: SHA256("account:Multisig")[0..8]
+/// Verified against real Drift Protocol Security Council multisig on mainnet.
+const SQUADS_MULTISIG_DISCRIMINATOR: [u8; 8] = [0xe0, 0x74, 0x79, 0xba, 0x44, 0xa1, 0x4f, 0xec];
 
 /// Fetch and decode a multisig account, auto-detecting the program type.
 pub async fn fetch_and_decode_multisig(
@@ -276,5 +277,60 @@ mod tests {
         data[2] = 0; // not initialized
         let result = decode_spl_multisig(&data, "Bad");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_real_drift_squads_v4_multisig() {
+        // Real Drift Protocol Security Council multisig from mainnet
+        // Address: 2LW6PSEjp81xSEttWwXDB6Etb1eKdhYPbFEojYbyhx88
+        // Owner: SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf (verified on-chain)
+        let fixture_path = format!(
+            "{}/tests/fixtures/drift_squads_multisig.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let raw = std::fs::read_to_string(&fixture_path)
+            .expect("Failed to read drift_squads_multisig.json fixture");
+        let json: serde_json::Value = serde_json::from_str(&raw)
+            .expect("Failed to parse fixture");
+
+        let b64 = json["result"]["value"]["data"][0]
+            .as_str()
+            .expect("Missing base64 data");
+        let data = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            b64,
+        )
+        .expect("Failed to decode base64");
+
+        let owner = json["result"]["value"]["owner"]
+            .as_str()
+            .expect("Missing owner");
+        assert_eq!(owner, SQUADS_V4_PROGRAM, "Account must be owned by Squads v4");
+
+        let result = decode_squads_v4(
+            &data,
+            "2LW6PSEjp81xSEttWwXDB6Etb1eKdhYPbFEojYbyhx88",
+        )
+        .expect("Failed to decode real Drift Squads v4 multisig");
+
+        // Verified from Drift postmortem: 2/5 multisig, no timelock
+        assert_eq!(result.threshold, 2, "Drift had 2/5 threshold");
+        assert_eq!(result.members.len(), 5, "Drift had 5 Security Council members");
+        assert_eq!(result.time_lock, 0, "Drift had no timelock");
+        assert_eq!(result.program, SQUADS_V4_PROGRAM);
+
+        // All members should have full permissions (7 = Proposer|Voter|Executor)
+        for (i, member) in result.members.iter().enumerate() {
+            assert_eq!(
+                member.permissions, 7,
+                "Member {} should have all permissions (7), got {}",
+                i, member.permissions
+            );
+            assert!(
+                member.pubkey.len() >= 32,
+                "Member {} pubkey should be valid base58",
+                i
+            );
+        }
     }
 }

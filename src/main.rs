@@ -388,7 +388,7 @@ fn generate_recommendations(
     // Rapid execution pattern
     let rapid_exec = tx_findings
         .iter()
-        .any(|f| f.reason.contains("rapid") || f.reason.contains("Rapid"));
+        .any(|f| f.reason.to_lowercase().contains("rapid"));
     if rapid_exec {
         recs.push(
             "CRITICAL: Rapid sequential durable nonce execution detected. \
@@ -435,4 +435,142 @@ fn generate_recommendations(
     );
 
     recs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types::*;
+
+    /// Build a MultisigInfo matching the real Drift Security Council config
+    fn drift_multisig() -> MultisigInfo {
+        MultisigInfo {
+            address: "2LW6PSEjp81xSEttWwXDB6Etb1eKdhYPbFEojYbyhx88".to_string(),
+            program: "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf".to_string(),
+            threshold: 2,
+            time_lock: 0,
+            members: (0..5)
+                .map(|i| MemberInfo {
+                    pubkey: format!("Signer{}", i),
+                    permissions: 7,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_drift_scenario_risk_and_recommendations() {
+        let ms = drift_multisig();
+
+        // Simulate what we'd find scanning Drift pre-exploit:
+        // - Nonce accounts created by unknown wallets (Critical)
+        let nonce_findings = vec![NonceFinding {
+            nonce_account: "7s7s6saC5LHZoLyBXLM3pCjpWaA7meyQdP8NiH9ktAeC".to_string(),
+            authority: "Signer0".to_string(),
+            created_by: Some("UnknownAttacker".to_string()),
+            creation_slot: Some(408444056),
+            nonce_value: "some_nonce".to_string(),
+            risk: RiskLevel::Critical,
+            reason: "Created by unknown wallet".to_string(),
+        }];
+
+        // - Two durable nonce txs 4 slots apart (rapid execution)
+        let tx_findings = vec![
+            TxFinding {
+                signature: "tx1".to_string(),
+                slot: 410344005,
+                nonce_account_used: "7s7s6saC5LHZoLyBXLM3pCjpWaA7meyQdP8NiH9ktAeC".to_string(),
+                nonce_authority: "Signer0".to_string(),
+                payload_summary: "squads:VaultTransactionCreate".to_string(),
+                risk: RiskLevel::High,
+                reason: "Transaction uses durable nonce (AdvanceNonceAccount as first instruction)."
+                    .to_string(),
+            },
+            TxFinding {
+                signature: "tx2".to_string(),
+                slot: 410344009,
+                nonce_account_used: "EmYEryTDXtuVCxrjNqJXbiwr4hfiJajd4g5P58vvhQnc".to_string(),
+                nonce_authority: "Signer1".to_string(),
+                payload_summary: "squads:VaultTransactionExecute".to_string(),
+                risk: RiskLevel::High,
+                reason: "Transaction uses durable nonce (AdvanceNonceAccount as first instruction)."
+                    .to_string(),
+            },
+            TxFinding {
+                signature: "rapid_cluster".to_string(),
+                slot: 410344005,
+                nonce_account_used: "multiple".to_string(),
+                nonce_authority: "multiple".to_string(),
+                payload_summary: "2 txs in 4 slots".to_string(),
+                risk: RiskLevel::Critical,
+                reason: "RAPID EXECUTION: 2 durable nonce transactions fired within 4 slots."
+                    .to_string(),
+            },
+        ];
+
+        // Risk should be Critical (from nonce findings)
+        let risk = compute_overall_risk(&nonce_findings, &tx_findings, &ms);
+        assert_eq!(risk, RiskLevel::Critical);
+
+        let recs = generate_recommendations(&nonce_findings, &tx_findings, &ms);
+
+        // Should contain all these recommendations for the Drift scenario
+        assert!(
+            recs.iter().any(|r| r.contains("unknown wallets")),
+            "Should warn about unknown nonce creators"
+        );
+        assert!(
+            recs.iter().any(|r| r.contains("freeze multisig")),
+            "Should recommend freezing on rapid execution"
+        );
+        assert!(
+            recs.iter().any(|r| r.contains("pending/queued")),
+            "Should recommend reviewing pending txs"
+        );
+        assert!(
+            recs.iter().any(|r| r.contains("2/5") && r.contains("4")),
+            "Should flag 2/5 threshold as below minimum 4"
+        );
+        assert!(
+            recs.iter().any(|r| r.contains("timelock")),
+            "Should recommend adding timelock"
+        );
+        assert!(
+            recs.iter().any(|r| r.contains("monitoring")),
+            "Should recommend monitoring"
+        );
+    }
+
+    #[test]
+    fn test_clean_multisig_low_risk() {
+        // A well-configured multisig with no findings
+        let ms = MultisigInfo {
+            address: "CleanMultisig".to_string(),
+            program: "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf".to_string(),
+            threshold: 4,
+            time_lock: 86400, // 24-hour timelock
+            members: (0..5)
+                .map(|i| MemberInfo {
+                    pubkey: format!("Signer{}", i),
+                    permissions: 7,
+                })
+                .collect(),
+        };
+
+        let risk = compute_overall_risk(&[], &[], &ms);
+        assert_eq!(risk, RiskLevel::Info, "Clean multisig should be Info risk");
+
+        let recs = generate_recommendations(&[], &[], &ms);
+        // Should NOT contain threshold or timelock warnings
+        assert!(
+            !recs.iter().any(|r| r.contains("threshold") || r.contains("Threshold")),
+            "4/5 threshold should not trigger warning"
+        );
+        assert!(
+            !recs.iter().any(|r| r.contains("timelock") || r.contains("Timelock")),
+            "24h timelock should not trigger warning"
+        );
+        // Should still recommend monitoring
+        assert!(recs.iter().any(|r| r.contains("monitoring")));
+    }
 }
