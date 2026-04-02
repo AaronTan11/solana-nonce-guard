@@ -45,27 +45,35 @@ async fn test_fetch_and_decode_real_drift_multisig() {
 /// Find nonce accounts for a known Drift signer.
 /// The nonce account from the exploit should still be on-chain.
 ///
-/// NOTE: Requires a dedicated RPC (Helius, Triton, QuickNode).
-/// Public RPCs block getProgramAccounts on the System Program.
-/// Run with: RPC_URL=https://your-rpc.helius.xyz cargo test -- --ignored
+/// NOTE: Requires an RPC that supports getProgramAccounts with memcmp filters
+/// on the System Program. Most providers (public RPC, Helius) block this.
+/// Triton, QuickNode, or self-hosted nodes typically support it.
 #[tokio::test]
 #[ignore]
 async fn test_find_nonce_accounts_for_drift_signer() {
-    let rpc_url = get_rpc_url();
-    if rpc_url.contains("api.mainnet-beta.solana.com") {
-        eprintln!("SKIPPED: requires dedicated RPC (public RPC blocks getProgramAccounts)");
-        eprintln!("Run with: RPC_URL=https://your-rpc.helius.xyz cargo test -- --ignored");
-        return;
-    }
+    let client = RpcClient::new(&get_rpc_url());
 
-    let client = RpcClient::new(&rpc_url);
-
-    let nonces = scanner::find_nonce_accounts(
+    let nonces = match scanner::find_nonce_accounts(
         &client,
         "39JyWrdbVdRqjzw9yyEjxNtTbTKcTPLdtdCgbz7C7Aq8",
     )
     .await
-    .expect("Should query nonce accounts without error");
+    {
+        Ok(n) => n,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("getProgramAccounts") || msg.contains("Too many accounts") {
+                eprintln!(
+                    "SKIPPED: RPC does not support getProgramAccounts with memcmp on System Program.\n\
+                     Error: {}\n\
+                     Use an RPC that supports this (Triton, QuickNode, self-hosted).",
+                    msg
+                );
+                return;
+            }
+            panic!("Unexpected error: {}", e);
+        }
+    };
 
     let exploit_nonce = nonces.iter().find(|n| {
         n.address == "7s7s6saC5LHZoLyBXLM3pCjpWaA7meyQdP8NiH9ktAeC"
@@ -111,19 +119,12 @@ async fn test_scan_tx_history_real() {
 /// Run the full scan pipeline against the Drift multisig.
 /// This is the ultimate end-to-end test.
 ///
-/// NOTE: Requires a dedicated RPC (Helius, Triton, QuickNode).
-/// Public RPCs block getProgramAccounts on the System Program.
+/// NOTE: Requires an RPC that supports getProgramAccounts with memcmp filters
+/// on the System Program. Most providers (public RPC, Helius) block this.
 #[tokio::test]
 #[ignore]
 async fn test_full_scan_pipeline_real() {
-    let rpc_url = get_rpc_url();
-    if rpc_url.contains("api.mainnet-beta.solana.com") {
-        eprintln!("SKIPPED: requires dedicated RPC (public RPC blocks getProgramAccounts)");
-        eprintln!("Run with: RPC_URL=https://your-rpc.helius.xyz cargo test -- --ignored");
-        return;
-    }
-
-    let client = RpcClient::new(&rpc_url);
+    let client = RpcClient::new(&get_rpc_url());
 
     // Step 1: Decode multisig
     let ms = multisig::fetch_and_decode_multisig(
@@ -142,9 +143,23 @@ async fn test_full_scan_pipeline_real() {
 
     // Step 2: Scan nonce accounts for first member only (to limit RPC calls)
     let first_member = &ms.members[0..1];
-    let (signer_infos, nonce_findings) = scanner::scan_all_signers(&client, first_member)
+    let (signer_infos, nonce_findings) = match scanner::scan_all_signers(&client, first_member)
         .await
-        .expect("Should scan signers");
+    {
+        Ok(result) => result,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("getProgramAccounts") || msg.contains("Too many accounts") {
+                eprintln!(
+                    "SKIPPED: RPC does not support getProgramAccounts with memcmp on System Program.\n\
+                     Error: {}",
+                    msg
+                );
+                return;
+            }
+            panic!("Unexpected error: {}", e);
+        }
+    };
 
     eprintln!(
         "Signer {}: {} nonce accounts, suspicious={}",

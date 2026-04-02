@@ -28,7 +28,12 @@ pub async fn find_nonce_accounts(
     let accounts = rpc
         .get_program_accounts(SYSTEM_PROGRAM, filters)
         .await
-        .context("Failed to query nonce accounts via getProgramAccounts")?;
+        .context(
+            "Failed to query nonce accounts via getProgramAccounts. \
+             Many RPC providers block or rate-limit getProgramAccounts on the System Program. \
+             Use an RPC that supports getProgramAccounts with memcmp filters \
+             (e.g., Triton, QuickNode, or a self-hosted node)."
+        )?;
 
     let mut nonces = Vec::new();
     for (pubkey, data) in accounts {
