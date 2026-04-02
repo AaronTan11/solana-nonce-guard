@@ -280,6 +280,62 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_real_usdc_spl_multisig() {
+        // Real USDC mint authority — an SPL Token Multisig on mainnet
+        // Address: BJE5MMbqXjVwjAF7oxwPYXnTXDyspzZyt4vwenNw5ruG
+        // Owner: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA (verified on-chain)
+        let fixture_path = format!(
+            "{}/tests/fixtures/usdc_spl_multisig.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let raw = std::fs::read_to_string(&fixture_path)
+            .expect("Failed to read usdc_spl_multisig.json fixture");
+        let json: serde_json::Value = serde_json::from_str(&raw)
+            .expect("Failed to parse fixture");
+
+        let b64 = json["result"]["value"]["data"][0]
+            .as_str()
+            .expect("Missing base64 data");
+        let data = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            b64,
+        )
+        .expect("Failed to decode base64");
+
+        let owner = json["result"]["value"]["owner"]
+            .as_str()
+            .expect("Missing owner");
+        assert_eq!(owner, SPL_TOKEN_PROGRAM, "Account must be owned by SPL Token");
+        assert_eq!(data.len(), 355, "SPL multisig should be exactly 355 bytes");
+
+        let result = decode_spl_multisig(
+            &data,
+            "BJE5MMbqXjVwjAF7oxwPYXnTXDyspzZyt4vwenNw5ruG",
+        )
+        .expect("Failed to decode real USDC SPL multisig");
+
+        assert_eq!(result.threshold, 2, "USDC multisig requires 2 signers");
+        assert_eq!(result.members.len(), 4, "USDC multisig has 4 signers");
+        assert_eq!(result.program, SPL_TOKEN_PROGRAM);
+        assert_eq!(result.time_lock, 0, "SPL multisig has no timelock");
+
+        // Verify the known USDC multisig signers
+        let expected_signers = [
+            "42XHrxUX5skic589HER817BWiJ5xvhJurrFVKjYCPwnb",
+            "BwdZnHHaC7Ho7xAAirLqWVLa9m7iWMkUN7PiZknActzy",
+            "Cf4s35LcAf9YC7wpdXTSxFg3i3GrvSYMavCVVefw3jd",
+            "HvhFE75zWkXvL7gAyjvatQcNrPA99ttFEz78kAgPF31v",
+        ];
+        for (i, expected) in expected_signers.iter().enumerate() {
+            assert_eq!(
+                result.members[i].pubkey, *expected,
+                "Signer {} mismatch",
+                i
+            );
+        }
+    }
+
+    #[test]
     fn test_decode_real_drift_squads_v4_multisig() {
         // Real Drift Protocol Security Council multisig from mainnet
         // Address: 2LW6PSEjp81xSEttWwXDB6Etb1eKdhYPbFEojYbyhx88
