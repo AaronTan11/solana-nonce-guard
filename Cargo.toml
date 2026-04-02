@@ -1,0 +1,21 @@
+[package]
+name = "solana-nonce-guard"
+version = "0.1.0"
+edition = "2021"
+description = "Detect durable nonce attack vectors on Solana multisig wallets"
+license = "MIT"
+repository = "https://github.com/AaronTan11/solana-nonce-guard"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+bs58 = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+colored = "2"
+futures-util = "0.3"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
