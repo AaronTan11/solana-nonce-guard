@@ -4,11 +4,12 @@ use serde_json::Value;
 use crate::rpc::RpcClient;
 use crate::types::{RiskLevel, TxFinding};
 
-/// Nonce-related instruction types in jsonParsed format.
-const ADVANCE_NONCE: &str = "advanceNonceAccount";
-const INITIALIZE_NONCE: &str = "initializeNonceAccount";
-const AUTHORIZE_NONCE: &str = "authorizeNonceAccount";
-const WITHDRAW_NONCE: &str = "withdrawNonceAccount";
+/// Nonce-related instruction types as returned by Solana RPC in jsonParsed format.
+/// Source: solana/transaction-status/src/parse_system.rs
+const ADVANCE_NONCE: &str = "advanceNonce";
+const INITIALIZE_NONCE: &str = "initializeNonce";
+const AUTHORIZE_NONCE: &str = "authorizeNonce";
+const WITHDRAW_NONCE: &str = "withdrawFromNonce";
 
 /// Scan transaction history for durable nonce usage.
 /// Returns findings for any transactions using durable nonce instructions.
@@ -272,83 +273,174 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // ---------- Unit tests using real Solana RPC instruction format ----------
+
     #[test]
-    fn test_is_nonce_instruction() {
+    fn test_is_nonce_instruction_real_format() {
+        // Real format from mainnet jsonParsed: "advanceNonce" not "advanceNonceAccount"
         let ix = json!({
-            "program": "system",
             "parsed": {
-                "type": "advanceNonceAccount",
                 "info": {
-                    "nonceAccount": "NonceAddr123",
-                    "nonceAuthority": "AuthAddr456"
-                }
-            }
+                    "nonceAccount": "7s7s6saC5LHZoLyBXLM3pCjpWaA7meyQdP8NiH9ktAeC",
+                    "nonceAuthority": "39JyWrdbVdRqjzw9yyEjxNtTbTKcTPLdtdCgbz7C7Aq8",
+                    "recentBlockhashesSysvar": "SysvarRecentB1ockHashes11111111111111111111"
+                },
+                "type": "advanceNonce"
+            },
+            "program": "system",
+            "programId": "11111111111111111111111111111111",
+            "stackHeight": 1
         });
 
         assert!(is_nonce_instruction(&ix, ADVANCE_NONCE));
         assert!(!is_nonce_instruction(&ix, INITIALIZE_NONCE));
+        assert!(!is_nonce_instruction(&ix, AUTHORIZE_NONCE));
+        assert!(!is_nonce_instruction(&ix, WITHDRAW_NONCE));
     }
 
     #[test]
-    fn test_extract_nonce_fields() {
+    fn test_extract_nonce_fields_real_format() {
+        // Exact structure from Drift exploit tx1 ix[0]
         let ix = json!({
-            "program": "system",
             "parsed": {
-                "type": "advanceNonceAccount",
                 "info": {
-                    "nonceAccount": "NonceAddr123",
-                    "nonceAuthority": "AuthAddr456"
-                }
-            }
+                    "nonceAccount": "7s7s6saC5LHZoLyBXLM3pCjpWaA7meyQdP8NiH9ktAeC",
+                    "nonceAuthority": "39JyWrdbVdRqjzw9yyEjxNtTbTKcTPLdtdCgbz7C7Aq8",
+                    "recentBlockhashesSysvar": "SysvarRecentB1ockHashes11111111111111111111"
+                },
+                "type": "advanceNonce"
+            },
+            "program": "system",
+            "programId": "11111111111111111111111111111111",
+            "stackHeight": 1
         });
 
         assert_eq!(
             extract_nonce_account(&ix),
-            Some("NonceAddr123".to_string())
+            Some("7s7s6saC5LHZoLyBXLM3pCjpWaA7meyQdP8NiH9ktAeC".to_string())
         );
         assert_eq!(
             extract_nonce_authority(&ix),
-            Some("AuthAddr456".to_string())
+            Some("39JyWrdbVdRqjzw9yyEjxNtTbTKcTPLdtdCgbz7C7Aq8".to_string())
+        );
+    }
+
+    // ---------- Tests against real Drift exploit transaction fixtures ----------
+
+    fn load_fixture(name: &str) -> Value {
+        let path = format!(
+            "{}/tests/fixtures/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        );
+        let data = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("Failed to read fixture {}: {}", path, e));
+        let json: Value = serde_json::from_str(&data)
+            .unwrap_or_else(|e| panic!("Failed to parse fixture {}: {}", name, e));
+        json["result"].clone()
+    }
+
+    #[test]
+    fn test_drift_exploit_tx1_detected_as_nonce_tx() {
+        // Real Drift exploit tx1: VaultTransactionCreate + ProposalCreate + ProposalApprove
+        // via durable nonce, slot 410344005
+        let tx = load_fixture("drift_exploit_tx1.json");
+        let findings = analyze_transaction(
+            &tx,
+            "2HvMSgDEfKhNryYZKhjowrBY55rUx5MWtcWkG9hqxZCFBaTiahPwfynP1dxBSRk9s5UTVc8LFeS4Btvkm9pc2C4H",
+            410344005,
+        );
+
+        assert!(!findings.is_empty(), "Should detect durable nonce usage in exploit tx1");
+        assert_eq!(findings[0].risk, RiskLevel::High);
+        assert_eq!(
+            findings[0].nonce_account_used,
+            "7s7s6saC5LHZoLyBXLM3pCjpWaA7meyQdP8NiH9ktAeC"
+        );
+        assert_eq!(
+            findings[0].nonce_authority,
+            "39JyWrdbVdRqjzw9yyEjxNtTbTKcTPLdtdCgbz7C7Aq8"
+        );
+        assert_eq!(findings[0].slot, 410344005);
+    }
+
+    #[test]
+    fn test_drift_exploit_tx2_detected_as_nonce_tx() {
+        // Real Drift exploit tx2: ProposalApprove + VaultTransactionExecute (admin takeover)
+        // via durable nonce, slot 410344009 — only 4 slots after tx1
+        let tx = load_fixture("drift_exploit_tx2.json");
+        let findings = analyze_transaction(
+            &tx,
+            "4BKBmAJn6TdsENij7CsVbyMVLJU1tX27nfrMM1zgKv1bs2KJy6Am2NqdA3nJm4g9C6eC64UAf5sNs974ygB9RsN1",
+            410344009,
+        );
+
+        assert!(!findings.is_empty(), "Should detect durable nonce usage in exploit tx2");
+        assert_eq!(findings[0].risk, RiskLevel::High);
+        assert_eq!(
+            findings[0].nonce_account_used,
+            "EmYEryTDXtuVCxrjNqJXbiwr4hfiJajd4g5P58vvhQnc"
+        );
+        assert_eq!(
+            findings[0].nonce_authority,
+            "6UJbu9ut5VAsFYQFgPEa5xPfoyF5bB5oi4EknFPvu924"
         );
     }
 
     #[test]
-    fn test_analyze_transaction_with_nonce() {
-        let tx = json!({
-            "transaction": {
-                "message": {
-                    "instructions": [
-                        {
-                            "program": "system",
-                            "parsed": {
-                                "type": "advanceNonceAccount",
-                                "info": {
-                                    "nonceAccount": "Nonce1",
-                                    "nonceAuthority": "Auth1"
-                                }
-                            }
-                        },
-                        {
-                            "program": "spl-token",
-                            "parsed": {
-                                "type": "transfer",
-                                "info": {}
-                            }
-                        }
-                    ]
-                }
-            }
-        });
+    fn test_drift_legit_tx_not_flagged() {
+        // Real Drift legitimate test withdrawal — no durable nonce usage
+        let tx = load_fixture("drift_legit_tx.json");
+        let findings = analyze_transaction(
+            &tx,
+            "BkUZ8nss1api3b4sFUDZAU81k2R2Y6SB4J77GF14UPrCeYGfRFaay1StPpwGTL86d1kJArWhiNi8xdAfR1AeVb6",
+            410343846,
+        );
 
-        let findings = analyze_transaction(&tx, "TxSig123", 12345);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].nonce_account_used, "Nonce1");
-        assert_eq!(findings[0].risk, RiskLevel::High);
-        assert!(findings[0].payload_summary.contains("spl-token"));
+        assert!(
+            findings.is_empty(),
+            "Legitimate tx should produce no nonce findings, got: {:?}",
+            findings
+        );
     }
 
     #[test]
-    fn test_analyze_transaction_normal() {
+    fn test_drift_rapid_execution_detected() {
+        // Simulate the two Drift exploit txs — 4 slots apart, should trigger rapid execution
+        let tx1 = load_fixture("drift_exploit_tx1.json");
+        let tx2 = load_fixture("drift_exploit_tx2.json");
+
+        let mut findings1 = analyze_transaction(
+            &tx1,
+            "2HvMSgDEfKhNryYZKhjowrBY55rUx5MWtcWkG9hqxZCFBaTiahPwfynP1dxBSRk9s5UTVc8LFeS4Btvkm9pc2C4H",
+            410344005,
+        );
+        let findings2 = analyze_transaction(
+            &tx2,
+            "4BKBmAJn6TdsENij7CsVbyMVLJU1tX27nfrMM1zgKv1bs2KJy6Am2NqdA3nJm4g9C6eC64UAf5sNs974ygB9RsN1",
+            410344009,
+        );
+        findings1.extend(findings2);
+
+        let rapid = detect_rapid_execution(&findings1);
+        assert_eq!(rapid.len(), 1, "Should detect rapid execution pattern");
+        assert_eq!(rapid[0].risk, RiskLevel::Critical);
+        assert!(
+            rapid[0].reason.contains("2 durable nonce transactions"),
+            "Should mention 2 txs, got: {}",
+            rapid[0].reason
+        );
+        assert!(
+            rapid[0].reason.contains("4 slots"),
+            "Should mention 4-slot gap, got: {}",
+            rapid[0].reason
+        );
+    }
+
+    // ---------- Other unit tests ----------
+
+    #[test]
+    fn test_analyze_normal_tx_no_findings() {
         let tx = json!({
             "transaction": {
                 "message": {
@@ -370,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_rapid_execution() {
+    fn test_detect_rapid_execution_with_gap() {
         let make_finding = |slot: u64| TxFinding {
             signature: format!("sig_{}", slot),
             slot,
@@ -382,34 +474,7 @@ mod tests {
                 .to_string(),
         };
 
-        // 3 txs within 5 slots — should trigger
-        let findings = vec![
-            make_finding(100),
-            make_finding(103),
-            make_finding(105),
-            make_finding(200), // gap > 10, separate
-        ];
-
-        let rapid = detect_rapid_execution(&findings);
-        assert_eq!(rapid.len(), 1);
-        assert_eq!(rapid[0].risk, RiskLevel::Critical);
-        assert!(rapid[0].reason.contains("3 durable nonce transactions"));
-    }
-
-    #[test]
-    fn test_detect_rapid_execution_no_cluster() {
-        let make_finding = |slot: u64| TxFinding {
-            signature: format!("sig_{}", slot),
-            slot,
-            nonce_account_used: "Nonce1".to_string(),
-            nonce_authority: "Auth1".to_string(),
-            payload_summary: "test".to_string(),
-            risk: RiskLevel::High,
-            reason: "Transaction uses durable nonce (AdvanceNonceAccount as first instruction)."
-                .to_string(),
-        };
-
-        // All txs >10 slots apart
+        // All txs >10 slots apart — should NOT trigger
         let findings = vec![make_finding(100), make_finding(200), make_finding(300)];
         let rapid = detect_rapid_execution(&findings);
         assert!(rapid.is_empty());
@@ -418,7 +483,7 @@ mod tests {
     #[test]
     fn test_summarize_payload() {
         let instructions = vec![
-            json!({ "program": "system", "parsed": { "type": "advanceNonceAccount" } }),
+            json!({ "program": "system", "parsed": { "type": "advanceNonce" } }),
             json!({ "program": "spl-token", "parsed": { "type": "transfer" } }),
             json!({ "programId": "CustomProgram123" }),
         ];

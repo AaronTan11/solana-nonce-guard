@@ -296,10 +296,17 @@ async fn cmd_monitor(
                 .as_str()
                 .unwrap_or("unknown");
 
+            // Note: System program nonce instructions don't always appear
+            // by name in runtime logs. These keywords catch cases where
+            // custom programs (e.g., Squads) log nonce-related activity.
+            // For comprehensive detection, use the `scan` or `tx-history`
+            // subcommands which parse full transaction data.
             let nonce_keywords = [
                 "InitializeNonceAccount",
                 "AuthorizeNonceAccount",
                 "AdvanceNonceAccount",
+                "nonce",
+                "Nonce",
             ];
 
             for log in logs {

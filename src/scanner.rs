@@ -205,7 +205,6 @@ mod tests {
         assert_eq!(result.state, 1);
         assert_eq!(result.lamports_per_signature, 5000);
         assert_eq!(result.address, "TestNonce");
-        // authority should be base58 of [0xAA; 32]
         assert_eq!(result.authority, bs58::encode([0xAA; 32]).into_string());
     }
 
@@ -218,11 +217,53 @@ mod tests {
     #[test]
     fn test_decode_nonce_uninitialized() {
         let mut data = vec![0u8; 80];
-        // state = 0 (Uninitialized)
         data[4..8].copy_from_slice(&0u32.to_le_bytes());
 
         let result = decode_nonce_account(&data, "Uninit").unwrap();
         assert_eq!(result.state, 0);
-        // This account would be filtered out by find_nonce_accounts
+    }
+
+    #[test]
+    fn test_decode_real_nonce_account_from_drift_exploit() {
+        // Real nonce account 7s7s6saC5LHZoLyBXLM3pCjpWaA7meyQdP8NiH9ktAeC
+        // used in the Drift Protocol exploit (April 2026)
+        let fixture_path = format!(
+            "{}/tests/fixtures/real_nonce_account.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let data = std::fs::read_to_string(&fixture_path)
+            .expect("Failed to read real_nonce_account.json fixture");
+        let json: serde_json::Value = serde_json::from_str(&data)
+            .expect("Failed to parse fixture JSON");
+
+        let b64_data = json["result"]["value"]["data"][0]
+            .as_str()
+            .expect("Missing base64 data");
+        let bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            b64_data,
+        )
+        .expect("Failed to decode base64");
+
+        assert_eq!(bytes.len(), 80, "Nonce account should be exactly 80 bytes");
+
+        let nonce = decode_nonce_account(
+            &bytes,
+            "7s7s6saC5LHZoLyBXLM3pCjpWaA7meyQdP8NiH9ktAeC",
+        )
+        .expect("Failed to decode real nonce account");
+
+        // Note: Solana nonce account Version field is 1 in practice (not 0)
+        // The Versions enum uses 1-based indexing in bincode serialization
+        assert!(nonce.version <= 1, "Version should be 0 or 1, got {}", nonce.version);
+        assert_eq!(nonce.state, 1, "State should be 1 (Initialized)");
+        assert_eq!(
+            nonce.address,
+            "7s7s6saC5LHZoLyBXLM3pCjpWaA7meyQdP8NiH9ktAeC"
+        );
+        // The authority should be a valid base58 pubkey (32 bytes → 43-44 chars)
+        assert!(nonce.authority.len() >= 32, "Authority should be a valid pubkey");
+        assert!(nonce.nonce_value.len() >= 32, "Nonce value should be a valid hash");
+        assert!(nonce.lamports_per_signature > 0, "Fee should be non-zero");
     }
 }
